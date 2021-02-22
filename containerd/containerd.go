@@ -20,6 +20,7 @@ package containerd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"time"
@@ -69,6 +70,8 @@ func (d *Driver) pullImage(imageName string) (containerd.Image, error) {
 }
 
 func (d *Driver) createContainer(containerConfig *ContainerConfig, config *TaskConfig) (containerd.Container, error) {
+	d.logger.Info("HELLO HELLO createContainer")
+
 	if config.Command == "" && len(config.Args) > 0 {
 		return nil, fmt.Errorf("Command is empty. Cannot set --args without --command.")
 	}
@@ -185,6 +188,16 @@ func (d *Driver) createContainer(containerConfig *ContainerConfig, config *TaskC
 		mounts = append(mounts, allocMount)
 	}
 
+	if len(config.ExtraHosts) > 0 {
+		d.logger.Info("HELLO IF extra hosts")
+		d.logger.Info(fmt.Sprintf("%+v\n", config.ExtraHosts))
+		if err := d.addExtraHosts(containerConfig.TaskDirSrc, config.ExtraHosts); err != nil {
+			return nil, err
+		}
+		extraHostsMount := buildMountpoint("bind", "/etc/hosts", containerConfig.TaskDirSrc+"/hosts", []string{"rbind", "rw"})
+		mounts = append(mounts, extraHostsMount)
+	}
+
 	if len(mounts) > 0 {
 		opts = append(opts, oci.WithMounts(mounts))
 	}
@@ -202,6 +215,7 @@ func (d *Driver) createContainer(containerConfig *ContainerConfig, config *TaskC
 	ctxWithTimeout, cancel := context.WithTimeout(d.ctxContainerd, 30*time.Second)
 	defer cancel()
 
+	d.logger.Info("FINAL STEP")
 	return d.client.NewContainer(
 		ctxWithTimeout,
 		containerConfig.ContainerName,
@@ -209,6 +223,47 @@ func (d *Driver) createContainer(containerConfig *ContainerConfig, config *TaskC
 		containerd.WithNewSnapshot(containerConfig.ContainerSnapshotName, containerConfig.Image),
 		containerd.WithNewSpec(opts...),
 	)
+}
+
+// addExtraHosts add hosts, given as host:IP to container /etc/hosts.
+func (d *Driver) addExtraHosts(taskDir string, extraHosts []string) error {
+	srcFile, err := os.Open("/etc/hosts")
+	if err != nil {
+		d.logger.Info("HELLO SRC FILE ERROR")
+		return err
+	}
+	defer srcFile.Close()
+
+	destFilePath := taskDir + "/hosts"
+	destFile, err := os.Create(destFilePath)
+	if err != nil {
+		d.logger.Info("HELLO DEST FILE ERROR")
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, srcFile)
+	if err != nil {
+		d.logger.Info("HELLO COPY ERROR")
+		return err
+	}
+
+	fd, err := os.OpenFile(destFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		d.logger.Info("HELLO OPEN DEST FILE ERROR")
+		return err
+	}
+	defer fd.Close()
+
+	for _, host := range extraHosts {
+		msg := fmt.Sprintf("%s\n", host)
+		if _, err := fd.WriteString(msg); err != nil {
+			return err
+		}
+	}
+	time.Sleep(10 * time.Second)
+	fmt.Println("HELLO: Finished sleeping")
+	return nil
 }
 
 // buildMountpoint builds the mount point for the container.
